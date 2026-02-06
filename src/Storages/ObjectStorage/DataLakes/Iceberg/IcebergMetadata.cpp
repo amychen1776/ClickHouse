@@ -1,3 +1,4 @@
+#include <base/sleep.h>
 #include "config.h"
 #if USE_AVRO
 
@@ -203,7 +204,38 @@ IcebergMetadata::IcebergMetadata(
     , persistent_components(initializePersistentTableComponents(configuration_, cache_ptr, context_))
     , data_lake_settings(configuration_->getDataLakeSettings())
     , write_format(configuration_->format)
+    , background_metadata_prefetcher_thread(std::make_unique<ThreadFromGlobalPool>([this](){ backgroundMetadataPrefetchedThread(); }))
 {
+}
+
+IcebergMetadata::~IcebergMetadata()
+{
+    /// TODO: wrongly placed, temp for now
+    shutdown_called = true;
+    if (background_metadata_prefetcher_thread && background_metadata_prefetcher_thread->joinable())
+        background_metadata_prefetcher_thread->join();
+}
+
+void IcebergMetadata::backgroundMetadataPrefetchedThread()
+{
+    while (!shutdown_called.load())
+    {
+
+        const auto [metadata_version, metadata_file_path, compression_method] = preheatCachesWithLatestVersions(
+            object_storage,
+            persistent_components.table_path,
+            data_lake_settings,
+            persistent_components.metadata_cache,
+            Context::getGlobalContextInstance()->getBackgroundContext(),
+            log.get(),
+            persistent_components.table_uuid);
+
+        LOG_INFO(getLogger("XEP"), "backgroundMetadataPrefetchedThread ... v={} p={} z={}",
+                 metadata_version, metadata_file_path, compression_method);
+
+        sleepForSeconds(10);
+    }
+    LOG_INFO(getLogger("XEP"), "backgroundMetadataPrefetchedThread finished");
 }
 
 Int32 IcebergMetadata::parseTableSchema(

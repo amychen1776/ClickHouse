@@ -865,7 +865,6 @@ std::pair<Poco::JSON::Object::Ptr, String> createEmptyMetadataFile(
     return {new_metadata_file_content, removeEscapedSlashes(oss.str())};
 }
 
-
 /**
  * Each version of table metadata is stored in a `metadata` directory and
  * has one of 2 formats:
@@ -976,6 +975,56 @@ static MetadataFileWithInfo getLatestMetadataFileAndVersion(
     }();
     return {latest_metadata_file_info.version, latest_metadata_file_info.path, getCompressionMethodFromMetadataFile(latest_metadata_file_info.path)};
 }
+
+
+MetadataFileWithInfo preheatCachesWithLatestVersions(
+    const ObjectStoragePtr & object_storage,
+    const String & table_path,
+    const DataLakeStorageSettings & data_lake_settings,
+    IcebergMetadataFilesCachePtr metadata_cache,
+    const ContextPtr & local_context,
+    Poco::Logger *,
+    const std::optional<String> & table_uuid)
+{
+
+    // MostRecentMetadataFileSelectionWay selection_way
+    //     = data_lake_settings[DataLakeStorageSetting::iceberg_recent_metadata_file_by_last_updated_ms_field].value
+    //     ? MostRecentMetadataFileSelectionWay::BY_LAST_UPDATED_MS_FIELD
+    //     : MostRecentMetadataFileSelectionWay::BY_METADATA_FILE_VERSION;
+    // bool need_all_metadata_files_parsing = (selection_way == MostRecentMetadataFileSelectionWay::BY_LAST_UPDATED_MS_FIELD)
+        // || (table_uuid.has_value() && false);
+    const auto metadata_files = listFiles(*object_storage, table_path, "metadata", ".metadata.json");
+    if (metadata_files.empty())
+    {
+        throw Exception(ErrorCodes::FILE_DOESNT_EXIST, "The metadata file for Iceberg table with path {} doesn't exist", table_path);
+    }
+    std::vector<ShortMetadataFileInfo> metadata_files_with_versions;
+    metadata_files_with_versions.reserve(metadata_files.size());
+    for (const auto & path : metadata_files)
+    {
+        String filename = std::filesystem::path(path).filename();
+        if (isTemporaryMetadataFile(filename))
+            continue;
+        auto [version, metadata_file_path, compression_method] = getMetadataFileAndVersion(path);
+        getMetadataJSONObject(
+            metadata_file_path,
+            object_storage,
+            metadata_cache,
+            local_context,
+            getLogger("XEP"),
+            compression_method,
+            table_uuid);
+
+        LOG_INFO(getLogger("XEP"), "prewarm ... v={} fn={} p={} z={}",
+                 version, filename, metadata_file_path, compression_method);
+    }
+
+    return getLatestMetadataFileAndVersion(
+        object_storage, table_path, data_lake_settings, metadata_cache, local_context, table_uuid, false);
+}
+
+
+
 
 MetadataFileWithInfo getLatestOrExplicitMetadataFileAndVersion(
     const ObjectStoragePtr & object_storage,
